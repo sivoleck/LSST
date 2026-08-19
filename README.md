@@ -51,15 +51,77 @@ Edita `config.py` para ajustar:
 
 ```
 {
-  match_id, game_mode, game_duration_seconds, game_version,
-  teams: { blue: { win, objectives }, red: { win, objectives } },
-  participants: [
-    { riotId, championName, role,
-      snapshots: { t5, t10, t15, t20, final },
-      final_stats: { kills, deaths, assists, kda, kp_percent, ... }
+  "info": {
+    "gameDuration": 1805,
+    "gameMode": "CLASSIC",
+    "gameVersion": "14.13.1",
+    "teams": [
+      {
+        "teamId": 100,
+        "win": true,
+        "kills": 25,
+        "objectives": {
+          "dragon": { "kills": 3 },
+          "tower": { "kills": 7 },
+          "baron": { "kills": 1 }
+        }
+      },
+      {
+        "teamId": 200,
+        "win": false,
+        "kills": 12,
+        "objectives": {
+          "dragon": { "kills": 1 },
+          "tower": { "kills": 2 },
+          "baron": { "kills": 0 }
+        }
+      }
+    ],
+    "participants": [
+      {
+        "participantId": 1,
+        "puuid": "Faker#T1",
+        "riotIdGameName": "Faker",
+        "riotIdTagLine": "T1",
+        "teamId": 100,
+        "teamPosition": "MIDDLE",
+        "championName": "Azir",
+        "win": true,
+        "kills": 8,
+        "deaths": 1,
+        "assists": 12,
+        "firstBloodKill": false,
+        "totalMinionsKilled": 245,
+        "detectorWardsPlaced": 4,
+        "challenges": {
+          "damagePerMinute": 950.2,
+          "visionScorePerMinute": 1.1,
+          "teamDamagePercentage": 0.32,
+          "kda": 20.0
+        }
+      }
+      // ... aquí irían los otros 9 participantes
+    ]
+  },
+  "timeline": {
+    "info": {
+      "frames": [
+        {
+          "timestamp": 900000,           // MS (ej: 900000 = minuto 15)
+          "participantFrames": {
+            "1": {
+              "minionsKilled": 135       // Único dato 100% fiable en local
+            },
+            "2": {
+              "minionsKilled": 80
+            }
+            // ... así para los participantes del 3 al 10
+          }
+        }
+        // ... esto se repite para el minuto 0, 1, 2, 3... hasta que acabe la partida
+      ]
     }
-  ],
-  events_timeline: [ ... ]
+  }
 }
 ```
 
