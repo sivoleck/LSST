@@ -100,6 +100,11 @@ def capture_player_snapshot(player: dict) -> dict:
     gold = None
     xp = None
 
+    # La Live Client API NO expone coordenadas de mapa para todos los jugadores
+    # (razones de anti-cheat). Se guarda None para mantener compatibilidad
+    # estructural con la función cordenadas() del bot.
+    position = None
+
     return {
         "gold": gold,
         "xp": xp,
@@ -108,6 +113,7 @@ def capture_player_snapshot(player: dict) -> dict:
         "deaths": int(scores.get("deaths", 0)),
         "assists": int(scores.get("assists", 0)),
         "level": int(player.get("level", 0)),
+        "position": position,  # {"x": float, "y": float} | None
     }
 
 
@@ -596,11 +602,51 @@ def build_output_json(
     red_towers = red_objectives["towers"]
     blue_wins = blue_towers >= red_towers  # Heurística (se reemplaza si hay evento GameEnd)
 
-    blue_gold = None
-    red_gold = None
+    # ── Asignar participantId (ORDER: 1-5, CHAOS: 6-10) ──────────────────
+    pid_counters = {"ORDER": 1, "CHAOS": 6}
+    player_pid_map = {}
+    for player in players:
+        name = player.get("riotIdGameName", player.get("summonerName", "?"))
+        tag = player.get("riotIdTagLine", "")
+        riot_id = f"{name}#{tag}" if tag else name
+        team = player.get("team", "ORDER")
+        pid = pid_counters.get(team, 1)
+        player_pid_map[riot_id] = pid
+        pid_counters[team] = pid + 1
 
-    # ── Construir participantes ───────────────────────────
-    participants = []
+    # ── Construir teams (Riot Match V5 format) ────────────────────────
+    teams_v5 = [
+        {
+            "teamId": 100,
+            "win": blue_wins,
+            "kills": blue_total_kills,
+            "objectives": {
+                "dragon": {"kills": blue_objectives["dragons"]},
+                "tower": {"kills": blue_objectives["towers"]},
+                "baron": {"kills": blue_objectives["baron"]},
+            }
+        },
+        {
+            "teamId": 200,
+            "win": not blue_wins,
+            "kills": red_total_kills,
+            "objectives": {
+                "dragon": {"kills": red_objectives["dragons"]},
+                "tower": {"kills": red_objectives["towers"]},
+                "baron": {"kills": red_objectives["baron"]},
+            }
+        }
+    ]
+
+    # ── First Blood ───────────────────────────────────────────────────
+    first_blood_killer = None
+    for e in all_events:
+        if e.get("EventName") == "ChampionKill":
+            first_blood_killer = e.get("KillerName")
+            break
+
+    # ── Construir participantes (Riot Match V5 format) ───────────────
+    participants_v5 = []
     for player in players:
         name = player.get("riotIdGameName", player.get("summonerName", "?"))
         tag = player.get("riotIdTagLine", "")
@@ -610,81 +656,80 @@ def build_output_json(
         team_id = 100 if team == "ORDER" else 200
         is_blue = team == "ORDER"
         team_dmg = blue_total_dmg if is_blue else red_total_dmg
-        team_kills = blue_total_kills if is_blue else red_total_kills
-
-        # Stats finales
+        
         final_stats = build_final_stats(player, game_time_seconds, team_dmg)
+        pid = player_pid_map.get(riot_id, 0)
+        
+        fb = False
+        if first_blood_killer:
+            fb = (first_blood_killer in name) or (first_blood_killer in riot_id)
 
-        # KP%
-        kills = final_stats["kills"]
-        assists = final_stats["assists"]
-        if team_kills > 0:
-            final_stats["kp_percent"] = round(((kills + assists) / team_kills) * 100, 1)
-
-        # Snapshots filtrados
-        filtered_snapshots = {}
-        for minute_key, minute_data in snapshot_buffer.items():
-            # Determinar si este minuto se guarda
-            if minute_key == "final":
-                should_keep = True
-            elif config.SNAPSHOT_KEEP_MINUTES is None:
-                should_keep = True
-            else:
-                should_keep = minute_key in config.SNAPSHOT_KEEP_MINUTES
-
-            if should_keep and riot_id in minute_data:
-                snap = minute_data[riot_id].copy()
-
-                # Calcular diffs para este snapshot
-                diffs = calculate_diffs(minute_data, opponents, minute_key)
-                if riot_id in diffs:
-                    snap.update(diffs[riot_id])
-
-                key = f"t{minute_key}" if isinstance(minute_key, int) else minute_key
-                filtered_snapshots[key] = snap
-
-        # Construir entrada del participante
-        participant = {
-            "riotId": riot_id,
+        p_v5 = {
+            "participantId": pid,
+            "puuid": riot_id,  # Fallback
+            "riotIdGameName": name,
+            "riotIdTagLine": tag,
             "teamId": team_id,
+            "teamPosition": player.get("position", ""),
             "championName": player.get("championName", ""),
-            "role": player.get("position", ""),
-            "level": player.get("level", 0),
-            "snapshots": filtered_snapshots,
-            "final_stats": final_stats,
+            "win": blue_wins if is_blue else not blue_wins,
+            "kills": final_stats["kills"],
+            "deaths": final_stats["deaths"],
+            "assists": final_stats["assists"],
+            "firstBloodKill": fb,
+            "totalMinionsKilled": final_stats["total_cs"],
+            "neutralMinionsKilled": 0,
+            "totalDamageTaken": final_stats["total_damage_taken"] or 0,
+            "detectorWardsPlaced": final_stats["control_wards_placed"] or 0,
+            "challenges": {
+                "damagePerMinute": final_stats["damage_per_minute"] or 0,
+                "goldPerMinute": final_stats["gold_per_minute"] or 0,
+                "visionScorePerMinute": final_stats["vision_per_minute"] or 0,
+                "teamDamagePercentage": (final_stats["team_dmg_percent"] or 0) / 100.0,
+                "kda": final_stats["kda"] or 0
+            }
         }
+        participants_v5.append(p_v5)
 
-        participants.append(participant)
+    # ── Construir frames (Riot Match V5 format) ──────────────────────
+    max_min = int(game_time_seconds // 60)
+    frames_v5 = []
+    for m in range(max_min + 1):
+        minute_data = snapshot_buffer.get(m, {})
+        p_frames = {}
+        for player in players:
+            name = player.get("riotIdGameName", player.get("summonerName", "?"))
+            tag = player.get("riotIdTagLine", "")
+            riot_id = f"{name}#{tag}" if tag else name
+            pid = str(player_pid_map.get(riot_id, 0))
+            
+            snap = minute_data.get(riot_id, {})
+            p_frames[pid] = {
+                "totalGold": snap.get("gold") or 0,
+                "xp": snap.get("xp") or 0,
+                "minionsKilled": snap.get("cs") or 0,
+                "jungleMinionsKilled": 0,
+                "position": {"x": None, "y": None}
+            }
+        frames_v5.append({
+            "timestamp": m * 60 * 1000,
+            "participantFrames": p_frames
+        })
 
-    # ── Construir JSON completo ───────────────────────────
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    match_id = f"custom_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
+    # ── JSON final ────────────────────────────────────────────────────
     output = {
-        "match_id": match_id,
-        "game_mode": game_info.get("gameMode", "CLASSIC"),
-        "game_duration_seconds": game_duration,
-        "game_version": game_info.get("gameVersion", ""),
-        "teams": {
-            "blue": {
-                "win": blue_wins,
-                "teamId": 100,
-                "total_kills": blue_total_kills,
-                "total_gold": blue_gold,
-                "objectives": blue_objectives,
-            },
-            "red": {
-                "win": not blue_wins,
-                "teamId": 200,
-                "total_kills": red_total_kills,
-                "total_gold": red_gold,
-                "objectives": red_objectives,
-            },
+        "info": {
+            "gameDuration": game_duration,
+            "gameMode": game_info.get("gameMode", "CLASSIC"),
+            "gameVersion": game_info.get("gameVersion", ""),
+            "teams": teams_v5,
+            "participants": participants_v5
         },
-        "participants": participants,
-        "events_timeline": all_events,
-        "collected_at": timestamp,
-        "collector_version": config.COLLECTOR_VERSION,
+        "timeline": {
+            "info": {
+                "frames": frames_v5
+            }
+        }
     }
 
     return output
