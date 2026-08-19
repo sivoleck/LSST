@@ -1,6 +1,6 @@
 # 📊 LoL Custom Match Tracker
 
-Recopilador de datos de partidas personalizadas de League of Legends. Genera un JSON estructurado **100% compatible con el formato de la API de Riot (Match V5)** para que tu bot de Discord pueda procesarlo directamente sin necesidad de programar funciones duplicadas.
+Recopilador de datos de partidas personalizadas de League of Legends. Genera un JSON estructurado **100% compatible con el formato de la API de Riot (Match V5)** para que puedas directamente sin necesidad de programar funciones duplicadas.
 
 Este sistema utiliza un método **híbrido** sin necesidad de API Keys:
 1. **Live Client Data API (En vivo):** Para recolectar el farmeo (CS) y eventos minuto a minuto mientras juegas.
