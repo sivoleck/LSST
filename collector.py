@@ -17,6 +17,8 @@ import sys
 import time
 import urllib3
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 # Fix encoding para consola de Windows (soportar emojis y caracteres especiales)
 if sys.platform == "win32":
@@ -407,6 +409,136 @@ def wait_for_game():
         time.sleep(3)
 
 
+
+# ═══════════════════════════════════════════════════════════
+#  LECTURA DE REPETICIONES (.rofl)
+# ═══════════════════════════════════════════════════════════
+
+def _pick(obj: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in obj:
+            return obj[key]
+    return None
+
+def _to_int(value: Any, default: int = 0) -> int:
+    if value is None or value == "": return default
+    try: return int(float(value))
+    except (TypeError, ValueError): return default
+
+def _to_float(value: Any, default: float | None = None) -> float | None:
+    if value is None or value == "": return default
+    try: return float(value)
+    except (TypeError, ValueError): return default
+
+def _parse_new_tail_metadata(data: bytes) -> dict[str, Any]:
+    if len(data) < 8: raise ValueError("Archivo muy pequeño.")
+    metadata_length = int.from_bytes(data[-4:], byteorder="little", signed=False)
+    if metadata_length <= 0 or metadata_length > len(data) - 4:
+        raise ValueError(f"Longitud inválida: {metadata_length}")
+    start = len(data) - 4 - metadata_length
+    raw = data[start : len(data) - 4]
+    return json.loads(raw.decode("utf-8"))
+
+def _parse_old_offset_metadata(data: bytes) -> dict[str, Any]:
+    file_info_pos = 262
+    file_info_len = 26
+    if len(data) < file_info_pos + file_info_len:
+        raise ValueError("No se pudo leer la info del archivo antiguo.")
+    info = data[file_info_pos : file_info_pos + file_info_len]
+    metadata_offset = int.from_bytes(info[6:10], byteorder="little", signed=False)
+    metadata_length = int.from_bytes(info[10:14], byteorder="little", signed=False)
+    payload_header_offset = int.from_bytes(info[14:18], byteorder="little", signed=False)
+    candidates = []
+    if 0 <= metadata_offset < payload_header_offset <= len(data):
+        candidates.append(data[metadata_offset:payload_header_offset])
+    if 0 <= metadata_offset < len(data) and metadata_length > 0:
+        candidates.append(data[metadata_offset : metadata_offset + metadata_length])
+    for raw in candidates:
+        try:
+            return json.loads(raw.decode("utf-8").strip("\x00\r\n\t "))
+        except: pass
+    raise ValueError("Fallo parseando old metadata.")
+
+def parse_rofl_stats(rofl_path: Path) -> list[dict[str, Any]]:
+    data = rofl_path.read_bytes()
+    if data[:4] != b"RIOT": raise ValueError("No es un .rofl válido.")
+    
+    metadata = None
+    for parser in (_parse_new_tail_metadata, _parse_old_offset_metadata):
+        try:
+            m = parser(data)
+            if isinstance(m, dict) and ("statsJson" in m or "gameLength" in m):
+                metadata = m
+                break
+        except: pass
+        
+    if not metadata: return []
+    
+    stats_raw = metadata.get("statsJson")
+    if isinstance(stats_raw, str):
+        stats_raw = json.loads(stats_raw) if stats_raw.strip() and stats_raw.strip() != "[]" else []
+    if not isinstance(stats_raw, list) or not stats_raw: return []
+
+    game_length_ms = _to_float(metadata.get("gameLength"))
+    game_minutes = game_length_ms / 60000 if game_length_ms and game_length_ms > 0 else None
+
+    result = []
+    for player in stats_raw:
+        game_name = _pick(player, "RIOT_ID_GAME_NAME", "riotIdGameName")
+        tag_line = _pick(player, "RIOT_ID_TAG_LINE", "riotIdTagline", "riotIdTagLine")
+        summoner_name = f"{game_name}#{tag_line}" if (game_name and tag_line) else str(game_name or _pick(player, "NAME", "summonerName", "SUMMONER_NAME"))
+
+        kills = _to_int(_pick(player, "CHAMPIONS_KILLED", "kills"), 0)
+        deaths = _to_int(_pick(player, "NUM_DEATHS", "deaths"), 0)
+        assists = _to_int(_pick(player, "ASSISTS", "assists"), 0)
+        damage = _to_int(_pick(player, "TOTAL_DAMAGE_DEALT_TO_CHAMPIONS", "totalDamageDealtToChampions", "damageToChampions"), 0)
+        dpm = round(damage / game_minutes, 1) if game_minutes else 0
+        kda_ratio = round((kills + assists) / deaths, 2) if deaths > 0 else float((kills + assists))
+
+        win_raw = _pick(player, "WIN", "win")
+        win = str(win_raw).lower() in ("win", "true", "1") if win_raw is not None else None
+
+        result.append({
+            "summoner_name": summoner_name,
+            "kills": kills,
+            "deaths": deaths,
+            "assists": assists,
+            "kda_ratio": kda_ratio,
+            "damage": damage,
+            "dpm": dpm,
+            "win": win,
+        })
+    return result
+
+def wait_for_rofl_file(timeout=120):
+    replays_dir = Path(os.path.expanduser("~")) / "Documents" / "League of Legends" / "Replays"
+    if not replays_dir.exists():
+        replays_dir = Path(os.path.expanduser("~")) / "OneDrive" / "Documents" / "League of Legends" / "Replays"
+        if not replays_dir.exists():
+            return None
+
+    def get_latest_rofl():
+        files = list(replays_dir.glob("*.rofl"))
+        return max(files, key=lambda p: p.stat().st_mtime) if files else None
+    
+    initial_latest = get_latest_rofl()
+    initial_mtime = initial_latest.stat().st_mtime if initial_latest else 0
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        current_latest = get_latest_rofl()
+        if current_latest:
+            current_mtime = current_latest.stat().st_mtime
+            if current_mtime > initial_mtime or (time.time() - current_mtime < 120 and current_latest != initial_latest):
+                time.sleep(2)  # Wait for file to finish writing
+                try:
+                    return parse_rofl_stats(current_latest)
+                except:
+                    return None
+        time.sleep(2)
+    return None
+
+
 def run_collector():
     """Bucle principal del collector."""
 
@@ -515,7 +647,17 @@ def run_collector():
         snapshot_buffer["final"] = snapshot_buffer[last_min]
         print(f"  [📸] Usando snapshot del minuto {last_min} como FINAL.")
 
-    # ── Construir JSON final ──────────────────────────────
+    print("\n  [📝] Partida terminada. Esperando datos avanzados (.rofl)...")
+    print("  [!] Por favor, ve al cliente de LoL y presiona 'Descargar Repetición' en el historial.")
+    print("  [!] Tienes 2 minutos para hacerlo. El script detectará el archivo automáticamente...")
+    
+    rofl_stats = wait_for_rofl_file(timeout=120)
+    
+    if rofl_stats:
+        print("  [✓] ¡Archivo .rofl detectado! Fusionando el daño y estadísticas avanzadas...")
+    else:
+        print("  [⚠] Tiempo agotado o repetición no encontrada. Guardando JSON sin daño...")
+
     print("\n  [📝] Construyendo JSON de salida...")
     output = build_output_json(
         game_data=game_data,
@@ -525,6 +667,7 @@ def run_collector():
         opponents=opponents,
         all_events=all_events,
         game_time_seconds=last_game_time,
+        rofl_stats=rofl_stats
     )
 
     # ── Guardar archivo ───────────────────────────────────
@@ -550,6 +693,7 @@ def build_output_json(
     opponents: dict,
     all_events: list,
     game_time_seconds: float,
+    rofl_stats: list = None,
 ) -> dict:
     """
     Construye el JSON final de salida con la estructura acordada.
@@ -578,15 +722,34 @@ def build_output_json(
             team_red_ids.add(name)
 
     # ── Calcular daño total por equipo ────────────────────
-    def team_total_dmg(team_players):
-        total = 0
-        for p in team_players:
-            scores = p.get("scores", {})
-            total += scores.get("totalDamageDealtToChampions", 0)
-        return total
+    def get_player_rofl_stats(pid_name, pid_tag, pid_full):
+        if not rofl_stats: return None
+        return next((r for r in rofl_stats if r["summoner_name"] == pid_full or r["summoner_name"] == pid_name), None)
 
-    blue_total_dmg = team_total_dmg(team_blue_players)
-    red_total_dmg = team_total_dmg(team_red_players)
+    blue_total_dmg = 0
+    red_total_dmg = 0
+    
+    if rofl_stats:
+        for p in team_blue_players:
+            n = p.get("riotIdGameName", p.get("summonerName", "?"))
+            full = f"{n}#{p.get('riotIdTagLine', '')}" if p.get('riotIdTagLine') else n
+            rs = get_player_rofl_stats(n, p.get('riotIdTagLine'), full)
+            if rs: blue_total_dmg += rs["damage"]
+            
+        for p in team_red_players:
+            n = p.get("riotIdGameName", p.get("summonerName", "?"))
+            full = f"{n}#{p.get('riotIdTagLine', '')}" if p.get('riotIdTagLine') else n
+            rs = get_player_rofl_stats(n, p.get('riotIdTagLine'), full)
+            if rs: red_total_dmg += rs["damage"]
+    else:
+        def team_total_dmg(team_players):
+            total = 0
+            for p in team_players:
+                scores = p.get("scores", {})
+                total += scores.get("totalDamageDealtToChampions", 0)
+            return total
+        blue_total_dmg = team_total_dmg(team_blue_players)
+        red_total_dmg = team_total_dmg(team_red_players)
 
     # ── Calcular kills totales por equipo (para KP%) ─────
     blue_total_kills = sum(p.get("scores", {}).get("kills", 0) for p in team_blue_players)
@@ -686,6 +849,23 @@ def build_output_json(
                 "kda": final_stats["kda"] or 0
             }
         }
+        
+        # Merge ROFL stats if available
+        rs = get_player_rofl_stats(name, tag, riot_id)
+        if rs:
+            p_v5["kills"] = rs["kills"]
+            p_v5["deaths"] = rs["deaths"]
+            p_v5["assists"] = rs["assists"]
+            p_v5["challenges"]["damagePerMinute"] = rs["dpm"]
+            p_v5["challenges"]["kda"] = rs["kda_ratio"]
+            if rs["win"] is not None:
+                p_v5["win"] = rs["win"]
+            
+            # Calculate team damage percentage properly since we now have real damage
+            if is_blue and blue_total_dmg > 0:
+                p_v5["challenges"]["teamDamagePercentage"] = rs["damage"] / blue_total_dmg
+            elif not is_blue and red_total_dmg > 0:
+                p_v5["challenges"]["teamDamagePercentage"] = rs["damage"] / red_total_dmg
         
         # Solo agregar totalDamageTaken si tenemos el dato (a veces disponible para el local player)
         if final_stats["total_damage_taken"]:
