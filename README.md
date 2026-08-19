@@ -42,9 +42,6 @@ Cuando la partida termine (explote el nexo), verás que el script se pausa y te 
 
 *(Nota: Si no descargas la repetición en 2 minutos, el script guardará el JSON igualmente, pero sin los datos de daño).*
 
-### 4. Sube el JSON a Discord
-Arrastra el archivo JSON a Discord y usa el comando de tu bot (ej: `/review`) adjuntando el archivo. El bot lo leerá como si fuera una partida de la API Oficial de Riot.
-
 ---
 
 ## ⚙️ Configuración
