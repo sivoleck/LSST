@@ -678,17 +678,19 @@ def build_output_json(
             "assists": final_stats["assists"],
             "firstBloodKill": fb,
             "totalMinionsKilled": final_stats["total_cs"],
-            "neutralMinionsKilled": 0,
-            "totalDamageTaken": final_stats["total_damage_taken"] or 0,
             "detectorWardsPlaced": final_stats["control_wards_placed"] or 0,
             "challenges": {
                 "damagePerMinute": final_stats["damage_per_minute"] or 0,
-                "goldPerMinute": final_stats["gold_per_minute"] or 0,
                 "visionScorePerMinute": final_stats["vision_per_minute"] or 0,
                 "teamDamagePercentage": (final_stats["team_dmg_percent"] or 0) / 100.0,
                 "kda": final_stats["kda"] or 0
             }
         }
+        
+        # Solo agregar totalDamageTaken si tenemos el dato (a veces disponible para el local player)
+        if final_stats["total_damage_taken"]:
+            p_v5["totalDamageTaken"] = final_stats["total_damage_taken"]
+            
         participants_v5.append(p_v5)
 
     # ── Construir frames (Riot Match V5 format) ──────────────────────
@@ -704,13 +706,20 @@ def build_output_json(
             pid = str(player_pid_map.get(riot_id, 0))
             
             snap = minute_data.get(riot_id, {})
-            p_frames[pid] = {
-                "totalGold": snap.get("gold") or 0,
-                "xp": snap.get("xp") or 0,
+            
+            p_frame_data = {
                 "minionsKilled": snap.get("cs") or 0,
-                "jungleMinionsKilled": 0,
-                "position": {"x": None, "y": None}
             }
+            # Solo añadir oro, xp o posicion si por algun motivo la API los devolvió
+            if snap.get("gold"):
+                p_frame_data["totalGold"] = snap["gold"]
+            if snap.get("xp"):
+                p_frame_data["xp"] = snap["xp"]
+            if isinstance(snap.get("position"), dict) and snap["position"].get("x") is not None:
+                p_frame_data["position"] = snap["position"]
+                
+            p_frames[pid] = p_frame_data
+
         frames_v5.append({
             "timestamp": m * 60 * 1000,
             "participantFrames": p_frames
